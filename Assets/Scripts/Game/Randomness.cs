@@ -12,6 +12,7 @@ public class Randomness : MonoBehaviour
     {
         volume = GetComponent<Volume>();
         volume.profile.TryGet(out colorAdjustments);
-        colorAdjustments.hueShift.value = randomHueShitf[Random.Range(0, randomHueShitf.Length)];
+        //colorAdjustments.hueShift.value = randomHueShitf[Random.Range(0, randomHueShitf.Length)];
     }
+
 }

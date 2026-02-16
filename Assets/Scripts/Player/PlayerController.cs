@@ -5,31 +5,82 @@ public class PlayerController : MonoBehaviour
 {
     private CharacterController controller;
     private Vector3 move;
-    public float forwardSpeed;
-    public float maxSpeed;
 
-    private int desiredLane = 1;//0:left, 1:middle, 2:right
-    public float laneDistance = 2.5f;//The distance between tow lanes
+    [Header("Speed Settings")]
+    public float forwardSpeed = 19f;
+    public float maxSpeed = 50f;
 
+    [Header("Lane Settings")]
+    private int desiredLane = 1;
+    public float laneDistance = 2.5f;
+    public float laneSwitchSpeed = 30f;
+
+    [Header("Ground Check")]
     public bool isGrounded;
     public LayerMask groundLayer;
     public Transform groundCheck;
 
+    [Header("Physics")]
     public float gravity = -12f;
     public float jumpHeight = 2;
     private Vector3 velocity;
 
+    [Header("Animation")]
     public Animator animator;
-    private bool isSliding = false;
 
+    [Header("Slide Settings")]
+    private bool isSliding = false;
     public float slideDuration = 1.5f;
 
-    bool toggle = false;
+    [Header("Shield")]
+    public GameObject shieldVisual;
+
+    // Death
+    private bool isDying = false;
+    private float deathDecelerationRate = 15f;
+    private Vector3 deathKnockback = Vector3.zero;
+
+    // Speed progression
+    private bool toggle = false;
+
+    // Cached references
+    private AudioManager cachedAudio;
+    private ScreenFlash cachedScreenFlash;
+    private TimeManager cachedTimeManager;
+    private CameraController cachedCamera;
+    private ObjectPool cachedPool;
+    private Coroutine slideCoroutine;
+
+    // Pre-allocated vectors
+    private Vector3 targetPosition;
+    private Vector3 diff;
+    private Vector3 moveDir;
+    private Vector3 safePos;
+
+    void Awake()
+    {
+        if (groundCheck == null)
+        {
+            Transform check = transform.Find("groundCheck");
+            if (check != null)
+                groundCheck = check;
+        }
+        if (groundLayer == 0)
+            groundLayer = LayerMask.GetMask("Ground");
+    }
 
     void Start()
     {
         controller = GetComponent<CharacterController>();
-        Time.timeScale = 1.2f;
+        // Don't overwrite forwardSpeed - use whatever is set in inspector
+        Time.timeScale = 1f;
+
+        // Cache references
+        cachedAudio = AudioManager.instance;
+        cachedScreenFlash = FindObjectOfType<ScreenFlash>();
+        cachedTimeManager = TimeManager.instance;
+        cachedCamera = FindObjectOfType<CameraController>();
+        cachedPool = ObjectPool.instance;
     }
 
     private void FixedUpdate()
@@ -37,7 +88,6 @@ public class PlayerController : MonoBehaviour
         if (!PlayerManager.isGameStarted || PlayerManager.gameOver)
             return;
 
-        //Increase Speed
         if (toggle)
         {
             toggle = false;
@@ -47,8 +97,7 @@ public class PlayerController : MonoBehaviour
         else
         {
             toggle = true;
-            if (Time.timeScale < 2f)
-                Time.timeScale += 0.005f * Time.fixedDeltaTime;
+
         }
     }
 
@@ -57,11 +106,30 @@ public class PlayerController : MonoBehaviour
         if (!PlayerManager.isGameStarted || PlayerManager.gameOver)
             return;
 
+        if (isDying)
+        {
+            HandleDeathMovement();
+            return;
+        }
+
         animator.SetBool("isGameStarted", true);
         move.z = forwardSpeed;
 
-        isGrounded = Physics.CheckSphere(groundCheck.position, 0.17f, groundLayer);
+        isGrounded = Physics.CheckSphere(groundCheck.position, 0.85f, groundLayer);
+
+        // Floor safety
+        if (transform.position.y < 0.5f)
+        {
+            safePos.x = transform.position.x;
+            safePos.y = 1f;
+            safePos.z = transform.position.z;
+            transform.position = safePos;
+            velocity.y = -1f;
+            isGrounded = true;
+        }
+
         animator.SetBool("isGrounded", isGrounded);
+
         if (isGrounded && velocity.y < 0)
             velocity.y = -1f;
 
@@ -69,9 +137,8 @@ public class PlayerController : MonoBehaviour
         {
             if (SwipeManager.swipeUp)
                 Jump();
-
             if (SwipeManager.swipeDown && !isSliding)
-                StartCoroutine(Slide());
+                slideCoroutine = StartCoroutine(Slide());
         }
         else
         {
@@ -80,12 +147,12 @@ public class PlayerController : MonoBehaviour
             {
                 StartCoroutine(Slide());
                 velocity.y = -10;
-            }                
-
+            }
         }
+
         controller.Move(velocity * Time.deltaTime);
 
-        //Gather the inputs on which lane we should be
+        // Lane switching
         if (SwipeManager.swipeRight)
         {
             desiredLane++;
@@ -99,63 +166,156 @@ public class PlayerController : MonoBehaviour
                 desiredLane = 0;
         }
 
-        //Calculate where we should be in the future
-        Vector3 targetPosition = transform.position.z * transform.forward + transform.position.y * transform.up;
-        if (desiredLane == 0)
-            targetPosition += Vector3.left * laneDistance;
-        else if (desiredLane == 2)
-            targetPosition += Vector3.right * laneDistance;
+        // Calculate target position
+        targetPosition.x = 0;
+        targetPosition.y = transform.position.y;
+        targetPosition.z = transform.position.z;
 
-        //transform.position = targetPosition;
-        if (transform.position != targetPosition)
+        if (desiredLane == 0)
+            targetPosition.x = -laneDistance;
+        else if (desiredLane == 2)
+            targetPosition.x = laneDistance;
+
+        if (transform.position.x != targetPosition.x)
         {
-            Vector3 diff = targetPosition - transform.position;
-            Vector3 moveDir = diff.normalized * 30 * Time.deltaTime;
-            if (moveDir.sqrMagnitude < diff.magnitude)
+            diff.x = targetPosition.x - transform.position.x;
+            diff.y = 0;
+            diff.z = 0;
+
+            float moveMagnitude = laneSwitchSpeed * Time.deltaTime;
+
+            if (moveMagnitude < Mathf.Abs(diff.x))
+            {
+                moveDir.x = Mathf.Sign(diff.x) * moveMagnitude;
+                moveDir.y = 0;
+                moveDir.z = 0;
                 controller.Move(moveDir);
+            }
             else
+            {
                 controller.Move(diff);
+            }
         }
 
         controller.Move(move * Time.deltaTime);
+
+        if (shieldVisual != null)
+            shieldVisual.SetActive(PlayerManager.shieldActive);
+    }
+
+    private void HandleDeathMovement()
+    {
+        forwardSpeed = Mathf.Lerp(forwardSpeed, 0, deathDecelerationRate * Time.deltaTime);
+        move.z = forwardSpeed;
+
+        deathKnockback = Vector3.Lerp(deathKnockback, Vector3.zero, 8f * Time.deltaTime);
+        velocity.y += gravity * Time.deltaTime;
+
+        controller.Move((move + deathKnockback) * Time.deltaTime);
+        controller.Move(velocity * Time.deltaTime);
+
+        if (forwardSpeed < 0.1f && !PlayerManager.gameOver)
+            PlayerManager.gameOver = true;
     }
 
     private void Jump()
-    {   
-        StopCoroutine(Slide());
+    {
+        if (slideCoroutine != null)
+            StopCoroutine(slideCoroutine);
+
         animator.SetBool("isSliding", false);
         animator.SetTrigger("jump");
         controller.center = Vector3.zero;
         controller.height = 2;
         isSliding = false;
-   
         velocity.y = Mathf.Sqrt(jumpHeight * 2 * -gravity);
     }
 
     private void OnControllerColliderHit(ControllerColliderHit hit)
     {
-        if(hit.transform.tag == "Obstacle")
+        if (hit.transform.CompareTag("Obstacle"))
         {
-            PlayerManager.gameOver = true;
-            FindObjectOfType<AudioManager>().PlaySound("GameOver");
+            if (PlayerManager.shieldActive)
+            {
+                hit.gameObject.SetActive(false);
+                if (cachedAudio != null)
+                    cachedAudio.PlaySound("ShieldHit");
+                StartCoroutine(ReenableCollision(hit.collider, 0.1f));
+            }
+            else
+            {
+                StartCoroutine(DeathSequence(hit));
+            }
         }
+    }
+
+    private IEnumerator DeathSequence(ControllerColliderHit hit)
+    {
+        if (isDying) yield break;
+        isDying = true;
+
+        Vector3 impactDirection = (transform.position - hit.point).normalized;
+        impactDirection.y = 0;
+        deathKnockback = impactDirection * 3f;
+
+        if (animator != null)
+        {
+            animator.SetTrigger("death");
+            animator.SetBool("isGameStarted", false);
+        }
+
+        if (cachedScreenFlash != null)
+            cachedScreenFlash.FlashGameOver();
+
+        if (cachedTimeManager != null)
+            cachedTimeManager.SlowMotion(0.3f, 0.7f);
+
+        yield return new WaitForSecondsRealtime(0.1f);
+
+        if (cachedAudio != null)
+            cachedAudio.PlaySound("GameOver");
+
+        SpawnImpactEffect(hit.point);
+
+        if (cachedCamera != null)
+            cachedCamera.Shake(0.4f, 0.25f);
+    }
+
+    private void SpawnImpactEffect(Vector3 position)
+    {
+        if (cachedPool == null) return;
+
+        GameObject effect = cachedPool.GetPooledObject();
+        if (effect != null)
+        {
+            effect.transform.position = position;
+            effect.SetActive(true);
+        }
+    }
+
+    private IEnumerator ReenableCollision(Collider obstacle, float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        if (obstacle != null)
+            Physics.IgnoreCollision(controller, obstacle, false);
     }
 
     private IEnumerator Slide()
     {
         isSliding = true;
         animator.SetBool("isSliding", true);
-        yield return new WaitForSeconds(0.25f/ Time.timeScale);
+
+        yield return new WaitForSeconds(0.25f / Time.timeScale);
+
         controller.center = new Vector3(0, -0.5f, 0);
         controller.height = 1;
 
-        yield return new WaitForSeconds((slideDuration - 0.25f)/Time.timeScale);
+        yield return new WaitForSeconds((slideDuration - 0.25f) / Time.timeScale);
 
         animator.SetBool("isSliding", false);
-
         controller.center = Vector3.zero;
         controller.height = 2;
-
         isSliding = false;
+        slideCoroutine = null;
     }
 }
